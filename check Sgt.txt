@@ -1,0 +1,114 @@
+repeat task.wait() until game:IsLoaded() and game.Players.LocalPlayer
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local player = Players.LocalPlayer
+
+-- Chờ player spawn và có HumanoidRootPart
+local root = nil
+local function waitForSpawn()
+    repeat task.wait(1) until player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+    root = player.Character:FindFirstChild("HumanoidRootPart")
+    repeat task.wait(0.5) until root and root.Position
+    print("✅ Player đã spawn tại tọa độ:", root.Position)
+end
+
+-- Ghi file Completed-art (chỉ 1 lần)
+local fileSent = false
+local function sendFile()
+    if fileSent then return end
+    local filename = player.Name .. ".txt"
+    local ok, err = pcall(function()
+        if not isfile(filename) then
+            writefile(filename, "Completed-art")
+            print("✅ Đã tạo file:", filename)
+        else
+            print("ℹ️ File đã tồn tại:", filename)
+        end
+    end)
+    if not ok then
+        warn("⚠️ Lỗi khi ghi file:", err)
+    end
+    fileSent = true
+end
+
+-- Kiểm tra tên SHULL GUITAR (case-insensitive)
+local function isShullGuitar(name)
+    if not name then return false end
+    local s = tostring(name):lower()
+    return (s:find("skull") and s:find("guitar")) or s == "skull guitar"
+end
+
+-- Kiểm tra Backpack
+local function checkBackpack()
+    local backpack = player:FindFirstChild("Backpack")
+    if backpack then
+        for _, obj in ipairs(backpack:GetChildren()) do
+            if isShullGuitar(obj.Name) then
+                print("🎯 Phát hiện SHULL GUITAR trong Backpack:", obj.Name)
+                return true
+            end
+        end
+    end
+    return false
+end
+
+-- Kiểm tra Character (Tool đang cầm)
+local function checkCharacter()
+    local char = player.Character
+    if char then
+        for _, obj in ipairs(char:GetChildren()) do
+            if obj:IsA("Tool") and isShullGuitar(obj.Name) then
+                print("🎯 Phát hiện SHULL GUITAR trên Character:", obj.Name)
+                return true
+            end
+        end
+    end
+    return false
+end
+
+-- Lấy inventory từ RemoteFunction
+local function getInventory()
+    local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+    if not remotes then return nil end
+    local commF = remotes:FindFirstChild("CommF_")
+    if not commF or not commF.InvokeServer then return nil end
+    local success, result = pcall(function()
+        return commF:InvokeServer("getInventory")
+    end)
+    return success and typeof(result) == "table" and result or nil
+end
+
+-- Kiểm tra Inventory
+local function checkInventory()
+    local inv = getInventory()
+    if not inv then return false end
+    for _, item in ipairs(inv) do
+        local name = tostring(item.Name or item.name or "")
+        if isShullGuitar(name) then
+            print("🎯 Phát hiện SHULL GUITAR trong Inventory:", name)
+            return true
+        end
+    end
+    return false
+end
+
+-- Bắt đầu script
+waitForSpawn()
+print("🔁 Bắt đầu theo dõi Backpack/Character/Inventory cho SHULL GUITAR...")
+
+while true do
+    if fileSent then break end
+    local found = false
+    pcall(function()
+        if checkBackpack() or checkCharacter() or checkInventory() then
+            found = true
+        end
+    end)
+    if found then
+        sendFile()
+        break
+    end
+    task.wait(2)
+end
+
+print("✅ Script hoàn tất.")
