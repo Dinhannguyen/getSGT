@@ -1,4 +1,4 @@
--- Blox Fruits Auto-Hop Script with Blacklist and GUI
+-- Blox Fruits Auto-Hop Script with Blacklist and GUI (Optimized)
 
 -- Services
 local Players = game:GetService("Players")
@@ -6,11 +6,16 @@ local TeleportService = game:GetService("TeleportService")
 local HttpService = game:GetService("HttpService")
 local RunService = game:GetService("RunService")
 local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 -- Local Player
 local player = Players.LocalPlayer
 local username = player.Name
 local blacklistFile = "blacklist.json"
+
+-- Trạng thái Hopping
+local isSearching = false
+local isHopping = false
 
 -- Blacklist Management
 local function loadBlacklist()
@@ -33,41 +38,115 @@ if not table.find(blacklist, username) then
     saveBlacklist(blacklist)
 end
 
--- Hop Function with Retry
-local function hopServer()
-    while true do
-        local success, err = pcall(function()
-            -- Get list of servers
-            local serversUrl = "https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100"
-            local response = game:HttpGet(serversUrl)
-            local servers = HttpService:JSONDecode(response).data
-            
-            -- Find a random server with players (avoid full or empty if possible)
-            local availableServers = {}
-            for _, server in ipairs(servers) do
-                if server.playing < server.maxPlayers and server.id ~= game.JobId then
-                    table.insert(availableServers, server.id)
+-- ==========================================
+-- CORE HOPPING LOGIC (Tối ưu theo chuẩn mới)
+-- ==========================================
+
+-- Hàm thực thi Teleport qua __ServerBrowser kết hợp Anti-Stuck
+local function executeTeleport(jobId)
+    if isHopping then return end
+    isHopping = true
+    
+    local initialJobId = game.JobId
+    local remote = ReplicatedStorage:FindFirstChild("__ServerBrowser")
+    
+    if remote then
+        pcall(function()
+            remote:InvokeServer("teleport", jobId)
+        end)
+    else
+        -- Fallback nếu game lỡ xóa mất remote __ServerBrowser
+        pcall(function()
+            TeleportService:TeleportToPlaceInstance(game.PlaceId, jobId, player)
+        end)
+    end
+
+    -- Anti-Stuck: Kiểm tra sau 10 giây, nếu chưa nhảy được thì reset để hop tiếp
+    task.delay(10, function()
+        if game.JobId == initialJobId then
+            isHopping = false -- Hủy trạng thái đang hop để 2 luồng quét tiếp tục
+        end
+    end)
+end
+
+-- Luồng quét bằng URL
+local function hopViaURL()
+    pcall(function()
+        local serversUrl = "https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100"
+        local response = game:HttpGet(serversUrl)
+        local servers = HttpService:JSONDecode(response).data
+        
+        local availableServers = {}
+        for _, server in ipairs(servers) do
+            if server.playing < server.maxPlayers and server.id ~= game.JobId then
+                table.insert(availableServers, server.id)
+            end
+        end
+        
+        if #availableServers > 0 then
+            local randomJobId = availableServers[math.random(1, #availableServers)]
+            executeTeleport(randomJobId)
+        end
+    end)
+end
+
+-- Luồng quét bằng Server Browser ẩn của Blox Fruits
+local function hopViaServerBrowser()
+    local remote = ReplicatedStorage:FindFirstChild("__ServerBrowser")
+    if remote then
+        pcall(function()
+            local response = remote:InvokeServer(1, "Singapore") -- Có thể đổi region tùy ý
+            if type(response) == "table" then
+                local availableServers = {}
+                for jobId, info in pairs(response) do
+                    if type(info) == "table" then
+                        local pCount = tonumber(info.Count) or 0
+                        -- Lọc server có người chơi nhưng chưa đầy (Blox Fruits max 12)
+                        if pCount > 0 and pCount < 12 and jobId ~= game.JobId then 
+                            table.insert(availableServers, jobId)
+                        end
+                    end
+                end
+                
+                if #availableServers > 0 then
+                    local randomJobId = availableServers[math.random(1, #availableServers)]
+                    executeTeleport(randomJobId)
                 end
             end
-            
-            if #availableServers > 0 then
-                local randomServer = availableServers[math.random(1, #availableServers)]
-                TeleportService:TeleportToPlaceInstance(game.PlaceId, randomServer, player)
-            else
-                -- Fallback to simple teleport if no servers found
-                TeleportService:Teleport(game.PlaceId, player)
-            end
         end)
-        
-        if success then
-            break -- teleport succeeds → stop loop
-        else
-            wait(5) -- retry after 5s
-        end
     end
 end
 
--- GUI Setup
+-- Hàm quản lý chạy song song 2 luồng
+local function hopServer()
+    if isSearching then return end
+    isSearching = true
+    
+    -- Luồng 1: Chạy quét URL
+    task.spawn(function()
+        while isSearching do
+            if not isHopping then
+                hopViaURL()
+            end
+            task.wait(3) -- Delay chống spam request
+        end
+    end)
+    
+    -- Luồng 2: Chạy quét Remote
+    task.spawn(function()
+        while isSearching do
+            if not isHopping then
+                hopViaServerBrowser()
+            end
+            task.wait(3.5) -- Lệch nhịp một chút so với URL để tối ưu
+        end
+    end)
+end
+
+-- ==========================================
+-- GUI SETUP & MAIN LOOPS (Phần cũ của bạn)
+-- ==========================================
+
 local gui = Instance.new("ScreenGui")
 gui.Name = "AutoHopGUI"
 gui.ResetOnSpawn = false
@@ -91,31 +170,29 @@ statusLabel.Font = Enum.Font.SourceSansBold
 statusLabel.Text = "Auto-Hop Active"
 statusLabel.Parent = frame
 
--- Function to update GUI status
 local function updateStatus(text)
     statusLabel.Text = text
 end
 
--- Variables for Anti-Idle & No-Spawn
 local idleTime = 0
 local noSpawnTime = 0
 local lastPosition = nil
-local checkInterval = 1  -- Check every second
+local checkInterval = 1  
 local blacklistChecked = false
 
 -- Main Loop
-spawn(function()
+task.spawn(function()
     while true do
-        wait(checkInterval)
+        task.wait(checkInterval)
         
-        -- Only check blacklist once after player spawn
+        -- Blacklist Check
         if not blacklistChecked and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
             blacklist = loadBlacklist()
             for _, blUsername in ipairs(blacklist) do
                 if blUsername ~= username and Players:FindFirstChild(blUsername) then
                     for i = 10, 1, -1 do
                         updateStatus("Blacklisted player detected! Hopping in " .. i .. "s")
-                        wait(1)
+                        task.wait(1)
                     end
                     hopServer()
                     break
@@ -151,17 +228,19 @@ spawn(function()
         end
 
         -- Reset GUI text
-        if statusLabel.Text ~= "Auto-Hop Active" then
-            wait(2)
+        if statusLabel.Text ~= "Auto-Hop Active" and not isSearching then
+            task.wait(2)
             updateStatus("Auto-Hop Active")
+        elseif isSearching then
+            updateStatus("Đang tìm Server để Hop...")
         end
     end
 end)
 
--- Anti-AFK (to prevent Roblox kick)
-spawn(function()
+-- Anti-AFK
+task.spawn(function()
     while true do
-        wait(60)  -- Every minute
+        task.wait(60)  
         local vu = game:GetService("VirtualUser")
         vu:CaptureController()
         vu:ClickButton2(Vector2.new())
