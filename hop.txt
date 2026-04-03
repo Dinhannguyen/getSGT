@@ -1,98 +1,86 @@
--- Blox Fruits Auto-Hop Script with Blacklist and GUI
+
+-- ===================== AUTO-HOP + BLACKLIST + GUI (SERVER BROWSER) =====================
+
+-- Chờ game tải xong hoàn toàn để tránh lỗi thiếu nhân vật/GUI
+if not game:IsLoaded() then
+    game.Loaded:Wait()
+end
 
 -- Services
 local Players = game:GetService("Players")
-local TeleportService = game:GetService("TeleportService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local HttpService = game:GetService("HttpService")
-local RunService = game:GetService("RunService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
 local UserInputService = game:GetService("UserInputService")
+local VirtualUser = game:GetService("VirtualUser")
+local CoreGui = game:GetService("CoreGui")
 
 -- Local Player
 local player = Players.LocalPlayer
 local username = player.Name
 local blacklistFile = "blacklist.json"
 
--- Blacklist Management
+-- ===================== CẤU HÌNH HOP SERVER =====================
+math.randomseed(tick() + player.UserId)
+local targetCountMin = 1
+local targetCountMax = 4
+local targetRegion = "Singapore"
+local isHopping = false
+local processStarted = false
+local startTime = tick()
+local lastTriedJob = nil
+
+-- ===================== BLACKLIST MANAGEMENT =====================
 local function loadBlacklist()
-    if isfile(blacklistFile) then
-        local content = readfile(blacklistFile)
-        return HttpService:JSONDecode(content) or {}
-    else
-        return {}
+    -- Kiểm tra an toàn xem executor có hỗ trợ isfile/readfile không
+    local hasIsFile = type(isfile) == "function"
+    local hasReadFile = type(readfile) == "function"
+    
+    if hasIsFile and hasReadFile then
+        local success, result = pcall(function()
+            if isfile(blacklistFile) then
+                return readfile(blacklistFile)
+            end
+        end)
+        
+        if success and result then
+            local decodeSuccess, decoded = pcall(function()
+                return HttpService:JSONDecode(result)
+            end)
+            if decodeSuccess then return decoded or {} end
+        end
+    end
+    return {}
+end
+
+local function saveBlacklist(blacklistData)
+    if type(writefile) == "function" then
+        pcall(function()
+            writefile(blacklistFile, HttpService:JSONEncode(blacklistData))
+        end)
     end
 end
 
-local function saveBlacklist(blacklist)
-    writefile(blacklistFile, HttpService:JSONEncode(blacklist))
-end
-
--- Add own username to blacklist if not already present
+-- Tự động thêm bản thân vào blacklist nếu chưa có
 local blacklist = loadBlacklist()
 if not table.find(blacklist, username) then
     table.insert(blacklist, username)
     saveBlacklist(blacklist)
 end
 
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-
-local function hopServer()
-    local oldJob = game.JobId
-
-    while true do
-        local success = pcall(function()
-
-            local serversUrl = "https://games.roblox.com/v1/games/" .. game.PlaceId .. "/servers/Public?sortOrder=Asc&limit=100"
-            local response = game:HttpGet(serversUrl)
-            local servers = HttpService:JSONDecode(response).data
-
-            local availableServers = {}
-            for _, server in ipairs(servers) do
-                if server.playing < server.maxPlayers 
-                and server.id ~= game.JobId then
-                    table.insert(availableServers, server.id)
-                end
-            end
-
-            if #availableServers == 0 then return end
-
-            local jobID = availableServers[math.random(1, #availableServers)]
-
-            local remote = ReplicatedStorage:FindFirstChild("__ServerBrowser")
-
-            -- chạy song song 2 kiểu hop
-            task.spawn(function()
-                if remote then
-                    remote:InvokeServer("teleport", jobID)
-                end
-            end)
-
-            task.spawn(function()
-                TeleportService:TeleportToPlaceInstance(game.PlaceId, jobID, player)
-            end)
-
-        end)
-
-        -- đợi hop
-        local waited = 0
-        repeat
-            task.wait(1)
-            waited += 1
-        until game.JobId ~= oldJob or waited > 10
-
-        -- nếu đã sang server mới thì dừng
-        if game.JobId ~= oldJob then
-            break
-        end
-
-        -- chưa sang → retry
-        wait(2)
-    end
-end
--- GUI Setup
+-- ===================== GUI SETUP =====================
 local gui = Instance.new("ScreenGui")
 gui.Name = "AutoHopGUI"
 gui.ResetOnSpawn = false
-gui.Parent = player:WaitForChild("PlayerGui")
+
+-- Thử gắn vào CoreGui trước (an toàn hơn, chống phát hiện), nếu không được thì gắn vào PlayerGui
+local successCoreGui = pcall(function()
+    gui.Parent = CoreGui
+end)
+
+if not successCoreGui then
+    gui.Parent = player:WaitForChild("PlayerGui", 10)
+end
 
 local frame = Instance.new("Frame")
 frame.Size = UDim2.new(0, 300, 0, 50)
@@ -112,57 +100,231 @@ statusLabel.Font = Enum.Font.SourceSansBold
 statusLabel.Text = "Auto-Hop Active"
 statusLabel.Parent = frame
 
--- Function to update GUI status
 local function updateStatus(text)
-    statusLabel.Text = text
+    if statusLabel then
+        statusLabel.Text = text
+    end
 end
 
--- Variables for Anti-Idle & No-Spawn
+-- ===================== LOGIC HOP SERVER BROWSER =====================
+local function ClickRefresh()
+    pcall(function()
+        local ui = player.PlayerGui:FindFirstChild("ServerBrowser")
+        if not ui then return end
+        local f = ui:FindFirstChild("Frame")
+        if not f then return end
+  
+        local refreshBtn = f:FindFirstChild("Refresh")
+        if refreshBtn and refreshBtn.Visible then
+            local x = refreshBtn.AbsolutePosition.X + (refreshBtn.AbsoluteSize.X / 2)
+            local y = refreshBtn.AbsolutePosition.Y + (refreshBtn.AbsoluteSize.Y / 2) + 58
+            VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 1)
+            task.wait(0.05)
+            VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 1)
+        end
+    end)
+end
+
+local function HopWithServerBrowser(jobId)
+    local remote = ReplicatedStorage:FindFirstChild("__ServerBrowser")
+    if remote then
+        pcall(function()
+            remote:InvokeServer("teleport", jobId)
+        end)
+    end
+end
+
+local function FilterAndJump(serverList)
+    if isHopping or type(serverList) ~= "table" then return end
+
+    local candidates = {}
+
+    for jobId, info in pairs(serverList) do
+        if type(info) == "table" then
+            local pCount = tonumber(info.Count) or 0
+            local pRegion = tostring(info.Region) or ""
+
+            if jobId ~= game.JobId
+            and string.find(pRegion, targetRegion)
+            and (pCount >= targetCountMin and pCount <= targetCountMax) then
+                table.insert(candidates, jobId)
+            end
+        end
+    end
+
+    if #candidates > 0 then
+        local chosenJob = candidates[math.random(1, #candidates)]
+
+        isHopping = true
+        lastTriedJob = chosenJob
+
+        updateStatus("Đã tìm thấy server! Đang tham gia...")
+        HopWithServerBrowser(chosenJob)
+
+        -- Retry nếu thất bại -> chọn server khác
+        task.spawn(function()
+            task.wait(5)
+            if game.JobId == lastTriedJob then
+                isHopping = false
+
+                if #candidates > 1 then
+                    local newJob
+                    repeat
+                        newJob = candidates[math.random(1, #candidates)]
+                    until newJob ~= lastTriedJob
+                    HopWithServerBrowser(newJob)
+                else
+                    HopWithServerBrowser(lastTriedJob)
+                end
+            end
+        end)
+    end
+end
+
+-- Hook Server Browser (Bắt response trả về)
+local mt = getrawmetatable(game)
+local oldNamecall = mt.__namecall
+setreadonly(mt, false)
+
+mt.__namecall = newcclosure(function(self, ...)
+    local method = getnamecallmethod()
+    local response = oldNamecall(self, ...)
+
+    if not isHopping
+    and (method == "InvokeServer" or method == "FireServer")
+    and tostring(self.Name) == "__ServerBrowser" then
+        if type(response) == "table" then
+            task.defer(function()
+                FilterAndJump(response)
+            end)
+        end
+    end
+
+    return response
+end)
+
+setreadonly(mt, true)
+
+local function StartHopProcess(statusText)
+    if processStarted then return end
+    processStarted = true
+    
+    if statusText then
+        updateStatus(statusText)
+    end
+
+    local ui = player:WaitForChild("PlayerGui"):WaitForChild("ServerBrowser", 5)
+    if ui then
+        ui.Enabled = true
+        local uiFrame = ui:FindFirstChild("Frame")
+        if uiFrame then 
+            uiFrame.Visible = true 
+
+            local filters = uiFrame:FindFirstChild("Filters")
+            if filters and filters:FindFirstChild("SearchRegion") and filters.SearchRegion:FindFirstChild("TextBox") then
+                filters.SearchRegion.TextBox.Text = targetRegion
+            end
+        end
+    else
+        updateStatus("LỖI: Không tìm thấy ServerBrowser!")
+        processStarted = false
+        return
+    end
+    
+    startTime = tick()
+
+    task.spawn(function()
+        while not isHopping do
+            pcall(function()
+                local remote = ReplicatedStorage:FindFirstChild("__ServerBrowser")
+                if remote then
+                    remote:InvokeServer(1, targetRegion)
+                end
+            end)
+
+            task.wait(3)
+
+            if not isHopping then
+                if (tick() - startTime) >= 10 then
+                    pcall(function()
+                        if ui then
+                            ui.Enabled = false
+                            task.wait(0.5)
+                            ui.Enabled = true
+
+                            if ui:FindFirstChild("Frame") then
+                                ui.Frame.Visible = true
+                            end
+                            
+                            local remote = ReplicatedStorage:FindFirstChild("__ServerBrowser")
+                            if remote then
+                                remote:InvokeServer(1, targetRegion)
+                            end
+                        end
+                    end)
+
+                    startTime = tick()
+                else
+                    if UserInputService.WindowFocused then
+                        ClickRefresh()
+                    end
+                end
+            end
+        end
+    end)
+end
+
+-- ===================== ANTI-IDLE & NO-SPAWN LOOP =====================
 local idleTime = 0
 local noSpawnTime = 0
 local lastPosition = nil
-local checkInterval = 1  -- Check every second
+local checkInterval = 1
 local blacklistChecked = false
 
--- Main Loop
-spawn(function()
+task.spawn(function()
     while true do
-        wait(checkInterval)
+        task.wait(checkInterval)
         
-        -- Only check blacklist once after player spawn
+        if processStarted or isHopping then continue end
+        
+        -- 1. Check Blacklist khi player spawn
         if not blacklistChecked and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
             blacklist = loadBlacklist()
             for _, blUsername in ipairs(blacklist) do
                 if blUsername ~= username and Players:FindFirstChild(blUsername) then
-                    for i = 10, 1, -1 do
-                        updateStatus("Blacklisted player detected! Hopping in " .. i .. "s")
-                        wait(1)
-                    end
-                    hopServer()
+                    -- Countdown 10s trước khi hop (không block luồng chính)
+                    task.spawn(function()
+                        for i = 10, 1, -1 do
+                            if processStarted then break end
+                            updateStatus("Blacklisted player detected! Hopping in " .. i .. "s")
+                            task.wait(1)
+                        end
+                        StartHopProcess("Đang hop server do Blacklist...")
+                    end)
+                    blacklistChecked = true
                     break
                 end
             end
             blacklistChecked = true
         end
 
-        -- Check No Spawn
+        -- 2. Check No Spawn (Đứng ngoài menu/loading quá lâu)
         if not player.Character then
             noSpawnTime = noSpawnTime + checkInterval
             if noSpawnTime > 120 then
-                updateStatus("No spawn detected! Hopping...")
-                hopServer()
+                StartHopProcess("No spawn detected! Hopping...")
             end
         else
             noSpawnTime = 0
-            -- Check Idle
+            
+            -- 3. Check Idle (Đứng yên một chỗ quá lâu)
             local humanoidRootPart = player.Character:FindFirstChild("HumanoidRootPart")
             if humanoidRootPart then
                 local currentPosition = humanoidRootPart.Position
                 if lastPosition and (currentPosition - lastPosition).Magnitude < 1 then
                     idleTime = idleTime + checkInterval
                     if idleTime > 120 then
-                        updateStatus("Idle detected! Hopping...")
-                        hopServer()
+                        StartHopProcess("Idle detected! Hopping...")
                     end
                 else
                     idleTime = 0
@@ -171,20 +333,20 @@ spawn(function()
             end
         end
 
-        -- Reset GUI text
-        if statusLabel.Text ~= "Auto-Hop Active" then
-            wait(2)
+        -- Reset lại text GUI nếu không có sự kiện gì đặc biệt
+        if not processStarted and not isHopping and statusLabel.Text ~= "Auto-Hop Active" and not string.match(statusLabel.Text, "Hopping in") then
             updateStatus("Auto-Hop Active")
         end
     end
 end)
 
--- Anti-AFK (to prevent Roblox kick)
-spawn(function()
+-- ===================== ANTI-AFK (ROBLOX KICK) =====================
+task.spawn(function()
     while true do
-        wait(60)  -- Every minute
-        local vu = game:GetService("VirtualUser")
-        vu:CaptureController()
-        vu:ClickButton2(Vector2.new())
+        task.wait(60) -- Mỗi 1 phút
+        pcall(function()
+            VirtualUser:CaptureController()
+            VirtualUser:ClickButton2(Vector2.new())
+        end)
     end
 end)
